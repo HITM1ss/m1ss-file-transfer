@@ -10,6 +10,8 @@ PASSWORD = os.environ.get("FILE_PASSWORD") or secrets.token_hex(8)
 UPLOAD_DIR = os.environ.get("UPLOAD_DIR", "uploads")
 MAX_MB = int(os.environ.get("MAX_MB", "50"))
 app.config["MAX_CONTENT_LENGTH"] = MAX_MB * 1024 * 1024
+CHUNK_SIZE = 512 * 1024  # 每块 512KB，低于网关约 1MB 的限制
+CHUNK_TOTAL_LIMIT = 20 * 1024 * 1024  # 分块传总上限 20MB
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 KEEP_SECONDS = 24 * 3600  # 文件只保留 24 小时，临时中转
@@ -65,11 +67,37 @@ MAIN_PAGE = """<!doctype html>
 </head>
 <body>
 <h1>文件中转站</h1>
-<p>临时传个小文件，24 小时后自动清理。单个文件不超过 {{ max_mb }} MB。</p>
-<form action="/upload" method="post" enctype="multipart/form-data">
-<input type="file" name="file" required>
+<p>临时传个小文件，24 小时后自动清理。1MB 以内直接传；大一点的文件（最长 20MB，比如手机照片）会自动分块传，不用你手动拆。</p>
+<form id="upform" action="/upload" method="post" enctype="multipart/form-data">
+<input type="file" name="file" id="fileinput" required>
 <button type="submit">上传</button>
 </form>
+<p id="upmsg" style="color:#555"></p>
+<script>
+document.getElementById("upform").addEventListener("submit", async function(e){
+  var f = document.getElementById("fileinput").files[0];
+  if (!f) return;
+  if (f.size > 20*1024*1024) { alert("文件超过 20MB，传不了"); e.preventDefault(); return; }
+  if (f.size <= 1024*1024) return; // 小文件走原来的直接上传
+  e.preventDefault();
+  var msg = document.getElementById("upmsg");
+  var uid = Date.now() + "-" + Math.random().toString(36).slice(2,8);
+  var total = Math.ceil(f.size / (512*1024));
+  for (var i = 0; i < total; i++) {
+    msg.textContent = "正在传第 " + (i+1) + "/" + total + " 块…";
+    var fd = new FormData();
+    fd.append("chunk", f.slice(i*512*1024, (i+1)*512*1024));
+    fd.append("filename", f.name);
+    fd.append("upload_id", uid);
+    fd.append("chunk_index", i);
+    fd.append("total_chunks", total);
+    var r = await fetch("/upload_chunk", {method: "POST", body: fd});
+    if (!r.ok) { msg.textContent = "第 " + (i+1) + " 块传失败了，刷新页面再试一次"; return; }
+  }
+  msg.textContent = "传完了，正在合并…";
+  location.reload();
+});
+</script>
 <h2>已上传的文件</h2>
 {% if files %}
 <ul>
@@ -121,6 +149,36 @@ def upload():
         name = safe_name(f.filename)
         f.save(os.path.join(UPLOAD_DIR, name))
     return redirect(url_for("index"))
+
+
+@app.route("/upload_chunk", methods=["POST"])
+def upload_chunk():
+    if not session.get("ok"):
+        return "login required", 403
+    f = request.files.get("chunk")
+    uid = (request.form.get("upload_id") or "").replace("/", "").replace("\\", "")
+    name = safe_name(request.form.get("filename"))
+    try:
+        idx = int(request.form.get("chunk_index", "0"))
+        total = int(request.form.get("total_chunks", "1"))
+    except ValueError:
+        return "bad index", 400
+    if not f or not uid or total < 1 or idx < 0 or idx >= total:
+        return "bad request", 400
+    chunk_dir = os.path.join(UPLOAD_DIR, ".chunks", uid)
+    os.makedirs(chunk_dir, exist_ok=True)
+    f.save(os.path.join(chunk_dir, "%d.part" % idx))
+    if len(os.listdir(chunk_dir)) == total:
+        # 最后一块到了，按顺序拼成完整文件
+        dest = os.path.join(UPLOAD_DIR, name)
+        with open(dest, "wb") as out:
+            for i in range(total):
+                with open(os.path.join(chunk_dir, "%d.part" % i), "rb") as part:
+                    out.write(part.read())
+        for i in range(total):
+            os.remove(os.path.join(chunk_dir, "%d.part" % i))
+        os.rmdir(chunk_dir)
+    return "ok"
 
 
 @app.route("/download/<path:name>")
