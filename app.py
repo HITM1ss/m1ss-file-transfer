@@ -14,7 +14,7 @@ CHUNK_SIZE = 512 * 1024  # 每块 512KB，低于网关约 1MB 的限制
 CHUNK_TOTAL_LIMIT = 20 * 1024 * 1024  # 分块传总上限 20MB
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-KEEP_SECONDS = 24 * 3600  # 文件只保留 24 小时，临时中转
+KEEP_SECONDS = 2 * 3600  # 文件只保留 2 小时，临时中转
 
 
 def safe_name(name):
@@ -67,7 +67,7 @@ MAIN_PAGE = """<!doctype html>
 </head>
 <body>
 <h1>文件中转站</h1>
-<p>临时传个小文件，24 小时后自动清理。1MB 以内直接传；大一点的文件（最长 20MB，比如手机照片）会自动分块传，不用你手动拆。</p>
+<p>临时传个小文件，2 小时后自动清理。1MB 以内直接传；大文件（20MB）自动分块上传。</p>
 <form id="upform" action="/upload" method="post" enctype="multipart/form-data">
 <input type="file" name="file" id="fileinput" required>
 <button type="submit">上传</button>
